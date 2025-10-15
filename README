@@ -1,0 +1,11 @@
+# WebZNC Web IRC client for ZNC bouncer
+
+This client runs as standaloe app and allows connection from mobile/desktop to ZNC with buffer replay and HTTP BASIC and URL parameter auth and channel to be loaded
+
+?auth=KEY
+
+?auth=KEY&channel=CHANNEL
+
+All config is in the PY file and can also be done by ENV vars as described there, SSL with self signed cert is supported.
+
+This server supports running stsandaloe at / on the specified port as well as under /znc behind a reverse proxy (if you want to use another directory seartch for /znc and change it).
