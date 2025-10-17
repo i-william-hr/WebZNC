@@ -1,11 +1,98 @@
-# WebZNC Web IRC client for ZNC bouncer
+# WebZNC
+### Web-based IRC client for ZNC bouncer
 
-This client runs as standaloe app and allows connection from mobile/desktop to ZNC with buffer replay and HTTP BASIC and URL parameter auth and channel to be loaded
+**WebZNC** is a self-contained Python web app that provides a simple, mobile-friendly interface for connecting to your ZNC instance.  
+It supports buffer replay, HTTP Basic authentication, and URL-parameter authentication for quick access from desktop or mobile.
 
-?auth=KEY
+---
 
-?auth=KEY&channel=CHANNEL
+## 🔧 Features
 
-All config is in the PY file and can also be done by ENV vars as described there, SSL with self signed cert is supported.
+- ✅ **Standalone or reverse-proxy deployment** — run directly on a port or behind `/znc` via nginx/Apache  
+- ✅ **Supports HTTP Basic auth** and **URL parameter auth**
+  - Example:  
+    ```
+    /?auth=KEY
+    /?auth=KEY&channel=#yourchannel
+    ```
+- ✅ **Buffer replay** from ZNC  
+- ✅ **Self-signed SSL** support  
+- ✅ **Channel list & direct messages (queries)** — unified sidebar with:  
+  - Separate **Channels** and **Direct Messages** sections  
+  - **Click a nick** to start a DM tab  
+  - **× Close buttons** on each tab (channels send `/part`, DMs close locally)  
+- ✅ **Unread counters** for inactive tabs (reset when opened)  
+- ✅ **Recent activity sorting** for DMs (most recent at the top)  
+- ✅ **Automatic persistence** — last active tab restored after reload  
+- ✅ **Mobile-optimized interface** (works well on iPhone and Android)  
+- ✅ **Single-file deployment** — no database or dependencies beyond `python3` and standard library  
 
-This server supports running stsandaloe at / on the specified port as well as under /znc behind a reverse proxy (if you want to use another directory seartch for /znc and change it).
+---
+
+## ⚙️ Configuration
+
+All settings are contained inside the single Python file (`webznc.py`) and can be overridden with **environment variables**.  
+The file includes inline comments for each configurable option.
+
+Example (shell):
+
+```bash
+export ZNC_HOST=znc.example.com
+export ZNC_PORT=6697
+export ZNC_USER=myuser
+export ZNC_PASS=mypass
+python3 webznc.py
+```
+
+---
+
+## 🌐 Deployment
+
+### Direct mode (standalone)
+```bash
+python3 webznc.py --host 0.0.0.0 --port 8080
+```
+Access via:
+```
+http://localhost:8080/?auth=YOURKEY
+```
+
+### Reverse proxy mode
+The app works under `/znc` if proxied via nginx or similar.  
+If you wish to change the base path, search for `/znc` in the code and replace it with your preferred directory.
+
+Example nginx snippet:
+```nginx
+location /znc {
+    proxy_pass http://127.0.0.1:8080;
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+}
+```
+
+---
+
+## 🔒 SSL
+Self-signed SSL certificates are supported (see in-code configuration).  
+For public deployment, use a proper certificate (e.g., from Let’s Encrypt).
+
+---
+
+## 🧩 Requirements
+- Python 3.8+
+- Works on Linux, macOS, or Windows
+- No external Python modules required (uses only standard library)
+
+---
+
+## 📱 Usage notes
+
+- Works great on modern mobile browsers (iOS Safari, Android Chrome).  
+- Uses a lightweight WebSocket bridge to maintain persistent connection and push live IRC updates.  
+- Ideal for running on small VPSes or behind your own ZNC instance.
+
+---
+
+## 🧠 Author
+Developed and maintained by **William Weber**  
+License: MIT
