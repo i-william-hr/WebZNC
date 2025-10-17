@@ -1,33 +1,20 @@
 #!/usr/bin/env python3
 """
-ZNC WebChat — single-user web client that keeps a persistent IRC/ZNC connection
-and serves a dark, mobile-friendly UI over FastAPI + WebSocket.
+WebZNC (public-safe build)
+---------------------------------
+This version is sanitized for GitHub. Replace the placeholder values below
+via environment variables or by editing the defaults in-place.
 
-- Persistent asyncio IRC client to ZNC (self-signed SSL ok)
-- Channels list, nicklist (with modes), join/part/quit lines
-- Send/receive, self-nick highlight, linkify, mIRC colors
-- Plays back ZNC buffer on connect (requires 'playback' module)
-- HTTP Basic OR ?auth=TOKEN (carried to WS via cookie)
-- Optimized for mobile (prevents zoom on input focus)
-- Can be run behind a reverse proxy on a subpath (e.g., /znc)
-- Join a channel on connect via URL parameter (e.g., ?channel=help)
-
-Quick start:
-  pip3 install --upgrade fastapi "uvicorn[standard]"
-  export ZNC_HOST='znc.example.com'
-  export ZNC_PORT='6697'
-  export ZNC_USER='user/network'
-  export ZNC_PASS='password'
-  export ZNC_NICK='webchat'
-  # Either Basic Auth:
-  export BASIC_USER='admin'; export BASIC_PASS='secret_password'
-  # Or Token Auth:
-  export AUTH_TOKEN='some_long_random_string'
-  export HTTP_HOST='0.0.0.0'
-  export HTTP_PORT='8080'
-  python3 znc.py
+Placeholders:
+  ZNC_HOST=znc.example.com
+  ZNC_PORT=6697  (SSL)
+  ZNC_USER=youruser/YourNetwork
+  ZNC_PASS=changeme
+  ZNC_NICK=yourNick
+  BASIC_USER=admin   (optional; leave blank to disable Basic auth)
+  BASIC_PASS=changeme
+  AUTH_TOKEN=        (optional; ?auth=TOKEN)
 """
-
 from __future__ import annotations
 import asyncio, os, re, ssl, time, base64
 from collections import defaultdict, deque
@@ -40,17 +27,17 @@ from fastapi.middleware.cors import CORSMiddleware
 from starlette.websockets import WebSocketState
 
 # =======================
-# Config (from environment variables)
+# Config (env override)
 # =======================
-ZNC_HOST = os.getenv("ZNC_HOST", "127.0.0.1")
+ZNC_HOST = os.getenv("ZNC_HOST", "znc.example.com")
 ZNC_PORT = int(os.getenv("ZNC_PORT", "6697"))
-ZNC_USER = os.getenv("ZNC_USER", "user/network")
-ZNC_PASS = os.getenv("ZNC_PASS", "password")
-ZNC_NICK = os.getenv("ZNC_NICK", "webchat")
+ZNC_USER = os.getenv("ZNC_USER", "youruser/YourNetwork")  # e.g. wm/Rizon
+ZNC_PASS = os.getenv("ZNC_PASS", "changeme")      # ONLY the password (client sends user/network:password)
+ZNC_NICK = os.getenv("ZNC_NICK", "yourNick")
 
 # Auth: HTTP Basic or token (?auth=TOKEN). If both empty, no auth.
-BASIC_USER = os.getenv("BASIC_USER", "")
-BASIC_PASS = os.getenv("BASIC_PASS", "")
+BASIC_USER = os.getenv("BASIC_USER", "admin")
+BASIC_PASS = os.getenv("BASIC_PASS", "changeme")
 AUTH_TOKEN = os.getenv("AUTH_TOKEN", "")
 
 # Web server
@@ -58,7 +45,7 @@ HTTP_HOST = os.getenv("HTTP_HOST", "0.0.0.0")
 HTTP_PORT = int(os.getenv("HTTP_PORT", "8080"))
 
 # History per channel
-MAX_HISTORY = int(os.getenv("MAX_HISTORY", "200"))
+MAX_HISTORY = int(os.getenv("MAX_HISTORY", "200")) # Increased default history
 
 # Reconnect strategy
 RECONNECT_BASE = float(os.getenv("RECONNECT_BASE", "1.5"))
@@ -138,8 +125,8 @@ def parse_irc_line(line: str) -> IrcMessage:
 
 def mirc_to_html(text: str, own_nick: str) -> str:
     text = text.replace("&","&amp;").replace("<","&lt;").replace(">","&gt;")
-    text = IRC_COLOR_RE.sub(lambda m: f'<span class="irc-fg fg-{int(m.group(1))}">', text)
-    text = text.replace("\x02","<b>").replace("\x1D","<i>").replace("\x1F","<u>").replace("\x0F","</span></b></i></u>")
+    text = IRC_COLOR_RE.sub(lambda m: f'<span class="irc-fg fg-{int(m.group(1))}">', text) # Use int() to normalize e.g. 01 -> 1
+    text = text.replace("\x02","<b>").replace("\x1D","<i>").replace("\x1F","<u>").replace("\x0F","</span></b></i></u>") # Reset properly
     text = URL_RE.sub(r'<a href="\1" target="_blank" rel="noreferrer noopener">\1</a>', text)
     if own_nick:
         pattern = re.compile(rf"(?<![\w])({re.escape(own_nick)})(?![\w])", re.IGNORECASE)
@@ -211,6 +198,7 @@ class IRCClient:
             line = await self.reader.readline()
             if not line: raise ConnectionError("IRC connection closed")
             s = line.decode(errors="ignore").rstrip("\r\n")
+            # print("IRC<<", s)  # uncomment to debug
             await self.handle(parse_irc_line(s))
 
     def _canon_chan(self, ch: str) -> Optional[str]:
@@ -246,12 +234,19 @@ class IRCClient:
                         self.channels.add(ch); added_any = True
                         await self.send_raw(f"PRIVMSG *status :Attach {ch}")
                         await self.send_raw(f"NAMES {ch}")
+                        # **FIX**: Request message buffer from ZNC's playback module
                         await self.send_raw(f"PRIVMSG *playback :Play {ch}")
                 if added_any:
                     for ch in sorted(list(self.channels)): await self.push_chan_update(ch)
 
             html = mirc_to_html(text, self.own_nick)
             chan = target if target.startswith("#") else nick
+            # Ensure direct messages (queries) appear as channels
+            if not chan.startswith('#'):
+                if chan not in self.channels:
+                    self.channels.add(chan)
+                    await self.push_chan_update(chan)
+
             self.append(chan, f"<span class='nick'>{nick}</span>: {html}")
             await self.push_chan_update(chan)
             return
@@ -263,15 +258,24 @@ class IRCClient:
             self.append(chan, f"→ <span class='evt'>{nick} joined</span>")
             await self.push_chan_update(chan); return
 
+        if m.cmd in ("474","403","404") and len(m.args) >= 2:
+            # 474: banned from channel; 403/404: no such channel / cannot join
+            ch = self._canon_chan(m.args[1]) or m.args[1]
+            if ch:
+                self.append(ch, f"⛔ <span class='evt'>Cannot join {ch} ({m.cmd})</span>")
+                self.channels.discard(ch); self.nicklists.pop(ch, None)
+                await self.push_chan_update(ch); return
+
         if m.cmd == "353" and len(m.args) >= 4:
             chan = m.args[2]; names = m.args[3].split(); nd = {}
             for n in names:
                 mode = ""
                 while n and n[0] in MODE_PREFIX: mode += MODE_PREFIX[n[0]] + ","; n = n[1:]
                 nd[n] = mode.strip(",")
-            self.nicklists[chan].update(nd); self.channels.add(chan)
+            self.nicklists[chan].update(nd); self.channels.add(chan) # Use update() for multi-line lists
+            # Don't push here, wait for 366
 
-        if m.cmd == "366" and len(m.args) >= 2:
+        if m.cmd == "366" and len(m.args) >= 2: # End of NAMES list
             await self.push_chan_update(m.args[1]); return
 
         if m.cmd == "PART":
@@ -279,6 +283,15 @@ class IRCClient:
             self.append(chan, f"← <span class='evt'>{nick} left</span>")
             if nick == self.own_nick: self.channels.discard(chan); self.nicklists.pop(chan, None)
             else: self.nicklists.get(chan, {}).pop(nick, None)
+            await self.push_chan_update(chan); return
+
+        if m.cmd == "KICK" and len(m.args) >= 2:
+            chan = m.args[0]; kicked = m.args[1]
+            nick = m.src.split("!")[0]
+            reason = (" "+m.args[2]) if len(m.args) >= 3 else ""
+            self.append(chan, f"× <span class='evt'>{kicked} was kicked by {nick}{reason}</span>")
+            if kicked == self.own_nick:
+                self.channels.discard(chan); self.nicklists.pop(chan, None)
             await self.push_chan_update(chan); return
 
         if m.cmd == "QUIT":
@@ -317,6 +330,11 @@ class IRCClient:
     async def join(self, chan: str): await self.send_raw(f"JOIN {chan}")
     async def part(self, chan: str): await self.send_raw(f"PART {chan}")
     async def privmsg(self, target: str, text: str):
+                    
+        # Ensure DM appears in sidebar when we start a query
+        if target and not target.startswith('#'):
+            if target not in self.channels:
+                self.channels.add(target)
         await self.send_raw(f"PRIVMSG {target} :{text}")
         self.append(target, f"<span class='nick self'>{self.own_nick}</span>: {mirc_to_html(text, self.own_nick)}")
         await self.push_chan_update(target)
@@ -334,8 +352,7 @@ INDEX_HTML = """<!DOCTYPE html><html lang="en"><head>
 <title>ZNC WebChat</title>
 <style>
 :root { --bg:#0b0d10; --fg:#e8eef2; --muted:#9aa7b1; --accent:#5aa9ff; --panel:#12151a; --chip:#1a1f27; --border:#222832; }
-*{box-sizing:border-box}
-html,body{margin:0;height:100%;background:var(--bg);color:var(--fg);font:14px -apple-system,BlinkMacSystemFont,Segoe UI,Inter,Roboto,Helvetica,Arial,sans-serif}
+*{box-sizing:border-box} html,body{margin:0;height:100%;background:var(--bg);color:var(--fg);font:11px -apple-system,BlinkMacSystemFont,Segoe UI,Inter,Roboto,Helvetica,Arial,sans-serif}
 #app{display:flex;height:100dvh;gap:10px;padding:10px}
 .sidebar{width:25%;max-width:340px;min-width:240px;background:var(--panel);border:1px solid var(--border);border-radius:16px;padding:10px;display:flex;flex-direction:column}
 .main{flex:1;background:var(--panel);border:1px solid var(--border);border-radius:16px;display:flex;flex-direction:column;min-width:0}
@@ -344,6 +361,7 @@ html,body{margin:0;height:100%;background:var(--bg);color:var(--fg);font:14px -a
 .chan{padding:8px 10px;border-radius:12px;background:var(--chip);cursor:pointer;display:flex;justify-content:space-between;align-items:center}
 .chan.active{outline:2px solid var(--accent)}
 .badge{background:var(--border);color:var(--muted);padding:2px 6px;border-radius:999px;font-size:12px}
+/* **FIX**: Nicklist changed to a vertical list */
 .nicklist{overflow:auto;padding:8px 12px;display:flex;flex-direction:column;gap:4px;border-top:1px solid var(--border)}
 .nick-item{padding: 2px 0;}
 .nick{color:#cfe5ff;font-weight:600}.nick.self{color:#a0ffcf}.self-nick{background:#254;padding:0 2px;border-radius:3px}
@@ -352,12 +370,27 @@ html,body{margin:0;height:100%;background:var(--bg);color:var(--fg);font:14px -a
 input[type=text]{flex:1;border-radius:10px;border:1px solid var(--border);padding:12px;background:#0f1318;color:var(--fg);font-size:16px}
 button{background:var(--accent);color:#00101f;border:0;padding:10px 14px;border-radius:10px;font-weight:700}
 .topbar{display:flex;gap:8px;align-items:center;padding:8px}.topbar input{flex:1}
+/* **FIX**: Added standard mIRC colors */
 .irc-fg{display:inline}.fg-0{color:#FFFFFF}.fg-1{color:#000000}.fg-2{color:#00007F}.fg-3{color:#009300}.fg-4{color:#FF0000}.fg-5{color:#7F0000}.fg-6{color:#9C009C}.fg-7{color:#FC7F00}.fg-8{color:#FFFF00}.fg-9{color:#00FC00}.fg-10{color:#009393}.fg-11{color:#00FFFF}.fg-12{color:#0000FC}.fg-13{color:#FF00FF}.fg-14{color:#7F7F7F}.fg-15{color:#D2D2D2}
 @media (max-width: 900px) {
     #app { flex-direction: column; }
-    .main { order: 1; flex: 1; min-height: 0; }
-    .sidebar { order: 2; width: 100%; max-width: none; min-width: unset; height: 40vh; min-height: 220px; }
-    .sidebar .chan-list, .sidebar .nicklist { flex: 1; }
+    .main {
+        order: 1;       /* Keep chat on top */
+        flex: 1;        /* Allow chat to grow and fill available space */
+        min-height: 0;  /* Crucial for flexbox sizing */
+    }
+    .sidebar {
+        order: 2;       /* Keep sidebar at the bottom */
+        width: 100%;
+        max-width: none;
+        min-width: unset;
+        height: 40vh;   /* Constrain sidebar to 40% of viewport height */
+        min-height: 220px; /* Ensure it's not too tiny */
+    }
+    /* Make the lists inside the sidebar use the available space and scroll */
+    .sidebar .chan-list, .sidebar .nicklist {
+        flex: 1;
+    }
 }
 </style></head>
 <body><div id="app">
@@ -376,18 +409,23 @@ button{background:var(--accent);color:#00101f;border:0;padding:10px 14px;border-
     </div>
     <div class="hdr">Channels</div>
     <div class="chan-list" id="chans"></div>
+    <div class="hdr">Direct Messages</div>
+    <div class="chan-list" id="dms"></div>
     <div class="hdr">Nicklist</div>
     <div class="nicklist" id="nicks"></div>
   </div>
 </div>
 <script>
-let WS; let ACTIVE=null; let STATE={channels:[],histories:{},nicks:{}};
+let WS; let ACTIVE=null; let STATE={channels:[],histories:{},nicks:{},unread:{},_seenLen:{}};
 const urlParams = new URLSearchParams(window.location.search);
 const initialChannel = urlParams.get('channel');
+const savedActive = localStorage.getItem('active');
 if (initialChannel) {
-    ACTIVE = initialChannel.startsWith('#') ? initialChannel : '#' + initialChannel;
+    ACTIVE = initialChannel; // channel param wins
+} else if (savedActive) {
+    ACTIVE = savedActive;
 }
-function wsUrl(){const loc=window.location; const proto=(loc.protocol==='https:')?'wss':'ws'; const auth=new URLSearchParams(loc.search).get('auth'); let u=`${proto}://${loc.host}${loc.pathname}ws`; if(auth) u+=`?auth=${encodeURIComponent(auth)}`; return u.replace('//ws', '/ws');}
+function wsUrl(){const loc=window.location; const proto=(loc.protocol==='https:')?'wss':'ws'; const auth=new URLSearchParams(loc.search).get('auth'); let u=`${proto}://${loc.host}/znc/ws`; if(auth) u+=`?auth=${encodeURIComponent(auth)}`; return u;}
 function connect(){ WS=new WebSocket(wsUrl()); WS.onopen=()=>console.log('ws open'); WS.onmessage=(ev)=>handle(JSON.parse(ev.data)); WS.onclose=()=>setTimeout(connect,1500); }
 function handle(msg){
   if(msg.type==='status'){ document.getElementById('title').textContent=`ZNC WebChat — ${msg.state}`; return; }
@@ -397,18 +435,56 @@ function handle(msg){
     const logEl = document.getElementById('log');
     if (logEl) { wasAtBottom = logEl.scrollHeight - logEl.clientHeight <= logEl.scrollTop + 1; }
     if(msg.channels) STATE.channels=msg.channels;
+  if(ACTIVE && !STATE.channels.includes(ACTIVE)) ACTIVE=null;
     if(msg.history) STATE.histories[msg.channel]=msg.history;
+    const len=(STATE.histories[msg.channel]||[]).length;
+    const prev=STATE._seenLen[msg.channel]||0;
+    if(ACTIVE!==msg.channel){ const inc=Math.max(0,len-prev); STATE.unread[msg.channel]=(STATE.unread[msg.channel]||0)+inc; }
+    STATE._seenLen[msg.channel]=len;
+    if(!STATE.lastTS) STATE.lastTS={}; const hist=STATE.histories[msg.channel]||[]; STATE.lastTS[msg.channel]=hist.length?hist[hist.length-1][0]:0;
     if(msg.nicklist) STATE.nicks[msg.channel]=msg.nicklist;
-    if(!ACTIVE && msg.channel && msg.channel.startsWith('#')) ACTIVE=msg.channel;
+    if(!ACTIVE && msg.channel){ ACTIVE=msg.channel; }
     renderChannels();
-    if(msg.channel===ACTIVE){ renderLog(ACTIVE, wasAtBottom); renderNicks(ACTIVE);}
+    if(msg.channel===ACTIVE){ STATE.unread[ACTIVE]=0; renderLog(ACTIVE, wasAtBottom); renderNicks(ACTIVE); localStorage.setItem('active', ACTIVE);}
     return;
   }
 }
 function send(o){ WS.send(JSON.stringify(o)); }
-function renderChannels(){ const el=document.getElementById('chans'); el.innerHTML=''; STATE.channels.forEach(c=>{ const d=document.createElement('div'); d.className='chan'+(c===ACTIVE?' active':''); d.textContent=c; const b=document.createElement('span'); b.className='badge'; b.textContent=(STATE.histories[c]||[]).length; d.appendChild(b); d.onclick=()=>{ ACTIVE=c; renderChannels(); renderLog(c, true); renderNicks(c); }; el.appendChild(d); }); }
+function renderChannels(){
+  const elC=document.getElementById('chans');
+  const elD=document.getElementById('dms');
+  if(elC) elC.innerHTML=''; if(elD) elD.innerHTML='';
+  const list=(STATE.channels||[]);
+  const chans=list.filter(c=>c && c.startsWith('#'));
+  let dms=list.filter(c=>c && !c.startsWith('#'));
+  dms=dms.sort((a,b)=>((STATE.lastTS?.[b]||0)-(STATE.lastTS?.[a]||0)));
+  const makeRow=(c)=>{
+    const d=document.createElement('div'); d.className='chan'+(c===ACTIVE?' active':'');
+    d.style.display='flex'; d.style.alignItems='center';
+    const name=document.createElement('span'); name.textContent=c; name.style.flex='1'; d.appendChild(name);
+    const badge=document.createElement('span'); const u=STATE.unread[c]||0; if(u>0){ badge.className='badge'; badge.textContent=u; badge.style.marginLeft='8px'; d.appendChild(badge);}
+    const close=document.createElement('button'); close.textContent='×'; close.title='Close';
+    close.style.fontSize='12px'; close.style.lineHeight='1'; close.style.padding='2px 6px'; close.style.minWidth='auto';
+    close.style.background='transparent'; close.style.border='none'; close.style.cursor='pointer'; close.style.opacity='0.7';
+    close.onmouseenter=()=>close.style.opacity='1'; close.onmouseleave=()=>close.style.opacity='0.7';
+    close.onclick=(e)=>{
+      e.stopPropagation();
+      const idx=list.indexOf(c);
+      if(idx>=0){ list.splice(idx,1); }
+      let next=null; if(ACTIVE===c){ next=list[idx]||list[idx-1]||null; }
+      send({type:'part', channel:c});
+      ACTIVE=next; renderChannels();
+      if(ACTIVE){ renderLog(ACTIVE, true); renderNicks(ACTIVE); } else { renderLog('', true); renderNicks(''); }
+    };
+    d.appendChild(close);
+    d.onclick=()=>{ ACTIVE=c; renderChannels(); renderLog(c, true); renderNicks(c); };
+    return d;
+  };
+  if(elC) chans.forEach(c=>{ elC.appendChild(makeRow(c)); });
+  if(elD) dms.forEach(c=>{ elD.appendChild(makeRow(c)); });
+}
 function renderLog(chan, scroll){ const list=STATE.histories[chan]||[]; const el=document.getElementById('log'); el.innerHTML=list.map(([ts,html])=>`<div class="msg" data-ts="${ts}">${html}</div>`).join(''); if(scroll) el.scrollTop=el.scrollHeight; document.getElementById('title').textContent=chan+' — ZNC WebChat'; }
-function renderNicks(chan){ const el=document.getElementById('nicks'); const nl=STATE.nicks[chan]||{}; el.innerHTML=''; Object.keys(nl).sort((a,b)=>a.localeCompare(b,undefined,{sensitivity:'base'})).forEach(n=>{ const item=document.createElement('div'); item.className='nick-item'; const mode=nl[n]?` [${nl[n]}]`:''; item.innerHTML=`<span class="nick">${n}</span>${mode}`; el.appendChild(item); }); }
+function renderNicks(chan){ const el=document.getElementById('nicks'); const nl=STATE.nicks[chan]||{}; el.innerHTML=''; Object.keys(nl).sort((a,b)=>a.localeCompare(b,undefined,{sensitivity:'base'})).forEach(n=>{ const item=document.createElement('div'); item.className='nick-item'; const mode=nl[n]?` [${nl[n]}]`:''; item.innerHTML=`<span class="nick">${n}</span>${mode}`; item.onclick=()=>{ if(!STATE.channels.includes(n)){ STATE.channels.push(n); renderChannels(); } if(!STATE.channels.includes(n)){ STATE.channels.push(n); } ACTIVE=n; renderChannels(); renderLog(n, true); renderNicks(n); document.getElementById("msg").focus(); }; el.appendChild(item); }); }
 document.getElementById('send').onclick=sendMessage;
 document.getElementById('msg').addEventListener('keydown',e=>{ if(e.key==='Enter') sendMessage(); });
 function sendMessage(){ const inp=document.getElementById('msg'); const text=inp.value.trim(); if(!text) return;
@@ -424,7 +500,7 @@ connect();
 </script>
 </body></html>"""
 
-@app.get("/{full_path:path}", response_class=HTMLResponse)
+@app.get("/", response_class=HTMLResponse)
 async def index(request: Request):
     require_auth(request)
     resp = HTMLResponse(INDEX_HTML)
@@ -435,30 +511,41 @@ async def index(request: Request):
         resp.set_cookie("auth_ok", "1", httponly=False, samesite="lax")
     return resp
 
-@app.websocket("/{subpath:path}ws")
+@app.get("/healthz")
+async def health(_: Request):
+    return PlainTextResponse("ok")
+@app.websocket("/ws")
 async def ws(websocket: WebSocket):
     ok = await ws_require_auth(websocket)
     if not ok: return
     await websocket.accept()
     irc.subscribe(websocket)
     try:
+        # **NEW CODE STARTS HERE**
+        # Check for a channel in the URL and join it
         channel_to_join = websocket.query_params.get("channel")
         if channel_to_join:
+            # Add '#' if missing
             if not channel_to_join.startswith("#"):
                 channel_to_join = "#" + channel_to_join
             await irc.join(channel_to_join)
+        # **NEW CODE ENDS HERE**
 
         try: await irc.send_raw('PRIVMSG *status :ListChans')
         except Exception: pass
-
         await irc.push_all()
         for ch in sorted(list(irc.channels)): await irc.push_chan_update(ch)
-
         while True:
             msg = await websocket.receive_json()
             typ = msg.get("type")
             if   typ == "join": await irc.join(msg.get("channel", ""))
-            elif typ == "part": await irc.part(msg.get("channel", ""))
+            elif typ == "part":
+                ch = msg.get("channel", "")
+                if ch and not ch.startswith("#"):
+                    irc.channels.discard(ch); irc.nicklists.pop(ch, None)
+                    await irc.push_chan_update(ch)
+                else:
+                    await irc.part(ch)
             elif typ == "msg":  await irc.privmsg(msg.get("target", ""), msg.get("text", ""))
             elif typ == "raw":  await irc.send_raw(msg.get("line", ""))
     except WebSocketDisconnect:
