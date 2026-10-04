@@ -1,0 +1,13 @@
+# Credentials and live config -- never commit these.
+# .env holds the real ZNC account name and password (ZNC_PASS).
+.env
+
+# Old session-signing key (pre-SSO refactor). No longer used by this app.
+webznc_secret.key
+
+# Python bytecode
+__pycache__/
+*.pyc
+
+# Virtualenv
+venv/

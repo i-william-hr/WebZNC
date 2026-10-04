@@ -1,0 +1,24 @@
+# webznc dependencies.
+#
+# About the irc pin, because it is not what this service used to run:
+#
+# This service previously ran the Debian package python3-irc, version
+# 0.0.8.5.3, which is upstream 8.5.3 from 2018. That version cannot be
+# installed from PyPI at all. Every 8.x release ships a source tarball whose
+# filename says 8.5.x but whose setup metadata declares 0.0.8.5.x, and modern
+# pip rejects a package whose metadata disagrees with the version requested:
+#
+#   ERROR: Requested irc==8.5.3 ... but installing version 0.0.8.5.3
+#   ERROR: ... has inconsistent version: expected '8.5.3', but metadata has
+#          '0.0.8.5.3'
+#
+# So the pin is 20.5.0, which is both installable and already running
+# successfully on this host: wbot uses it, and it does considerably more with
+# the library than webznc does. This is a deliberate version jump, not a
+# like-for-like migration, and it was verified by restarting the service and
+# confirming it still authenticates to the bouncer and serves its UI.
+#
+# The jump brings a decade of upstream fixes, so the risk here is the opposite
+# of usual: the old code is what was untested against a modern Python.
+Flask==3.1.3
+irc==20.5.0
